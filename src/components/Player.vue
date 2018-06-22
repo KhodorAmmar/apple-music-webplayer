@@ -22,7 +22,21 @@
       <b-col>
         <b-button variant="link" v-on:click.prevent="unauthorize()">Sign out of Apple Music</b-button>
 
+        <!-- Search -->
+        <h2 class="text-uppercase heading">Search</h2>
+        <b-form v-on:submit.prevent="load('search')">
+          <b-form-radio-group id="radios2" v-model="search.library" name="radioSubComponent" buttons button-variant="outline-primary" class="mb-1 btn-group-sm w-100">
+            <b-form-radio :value="false" class="w-50">Apple Music</b-form-radio>
+            <b-form-radio :value="true" class="w-50">Library</b-form-radio>
+          </b-form-radio-group>
+
+          <b-form-input id="q" type="text" v-model="search.query" placeholder="Search" />
+
+          <b-button type="submit" class="d-none">Search</b-button>
+        </b-form>
+
         <!-- Apple Music -->
+        <h2 class="text-uppercase heading">Apple Music</h2>
         <b-list-group class="mb-2">
           <b-list-group-item href="#" v-on:click.prevent="load('user:recommendations')">Recommendations</b-list-group-item>
         </b-list-group>
@@ -62,9 +76,20 @@
         <div v-else-if="results.type === 'recommendations'">
           <Recommendations :recommendations="results.recommendations" title="Recommendations" />
         </div>
+        <div v-else-if="results.type === 'search'">
+          <SearchResults :results="results.results" :title='`Search results for "${results.query}"`' />
+        </div>
+
+        <div v-if="loading" class="text-center pt-4">
+          <p><i class="fa fa-circle-o-notch fa-spin loading" aria-hidden="true"></i></p>
+          <p>Loading</p>
+        </div>
       </b-col>
       <b-col cols="9" v-else>
-        <div v-if="hasFullAccess">Loading results...</div>
+        <div v-if="loading" class="text-center pt-4">
+          <p><i class="fa fa-circle-o-notch fa-spin loading" aria-hidden="true"></i></p>
+          <p>Loading</p>
+        </div>
       </b-col>
     </b-row>
     <b-row>
@@ -91,6 +116,7 @@ import Artists from './Artists.vue';
 import Songs from './Songs.vue';
 import SongCollection from './SongCollection.vue';
 import Recommendations from './Recommendations.vue';
+import SearchResults from './SearchResults.vue';
 
 export default {
   name: 'Player',
@@ -100,7 +126,12 @@ export default {
   data: function() {
     return {
       userPlaylists: [],
+      loading: true,
       results: null,
+      search: {
+        query: "",
+        library: false
+      }
     }
   },
   methods: {
@@ -119,6 +150,9 @@ export default {
 
         case 'user:recommendations': req = { recommendations: null };
                                      break;
+
+        case 'search': req = { search: this.search.query, library: this.search.library };
+                       break;
       }
 
       EventBus.$emit('load', req);
@@ -130,16 +164,21 @@ export default {
   created: function() {
     // Application events
     this.onQueue = (descriptor) => {
-      console.log(descriptor);
       this.musicKit.setQueue(descriptor)
         .then(
           (q) => { 
             // Store the sourceId of each item, so we can update the UI as the song plays
             q.items.forEach(i => i.sourceId = i.id);
 
-            this.musicKit.player.changeToMediaItem(q.item(descriptor.startPosition || 0)).then(
-              () => null,
-              err => console.error(err))
+            this.musicKit.player.changeToMediaItem(q.item(descriptor.startPosition || 0)).catch(
+              err => {
+                let next = () => {
+                  this.musicKit.skipToNextItem().catch(err => next());
+                }
+
+                next();
+                console.error(err)
+              })
           },
           (err) => console.error(err)
         );
@@ -148,6 +187,7 @@ export default {
 
     this.onLoad = (description) => {
       // Clear previous results
+      this.loading = true;
       this.results = null;
       window.scrollTo(0, 0);
 
@@ -180,6 +220,8 @@ export default {
 
             if (inAlbums.length == 100) {
               getAlbums(start + 100);
+            } else {
+              this.loading = false;
             }
             
           });
@@ -208,6 +250,8 @@ export default {
 
             if (inArtists.length == 100) {
               getArtists(start + 100);
+            } else {
+              this.loading = false;
             }
             
           });
@@ -237,8 +281,9 @@ export default {
 
             if (inSongs.length == 100) {
               getSongs(start + 100);
+            } else {
+              this.loading = false;
             }
-            
           });
         };
 
@@ -251,6 +296,8 @@ export default {
             type: 'album',
             album: res
           };
+
+          this.loading = false;
         });
       }
       else if ('artist' in description) {
@@ -259,15 +306,21 @@ export default {
             type: 'artist',
             artist: res
           };
+
+          this.loading = false;
         });
       }
       // Playlist
       else if ('playlist' in description) {
+        var tracks = [];
+
         api.playlist(description.playlist).then(res => {
           this.results = {
             type: 'playlist',
             playlist: res
           };
+
+          this.loading = false;
         });
       }
       // Recommendations
@@ -277,10 +330,44 @@ export default {
             type: 'recommendations',
             recommendations: res
           };
+
+          this.loading = false;
         });
+      }
+      // Search
+      else if ('search' in description) {
+        var types = [ 'songs', 'albums', 'artists', 'playlists' ];
+
+        if (description.library !== false) {
+          types = types.map(i => 'library-' + i);
+        }
+
+        api.search(description.search, { types: types }).then(res => {
+          // Do some cleanup
+          for (var key in res) {
+            if (key.startsWith('library-')) {
+              res[key.replace('library-', '')] = res[key];
+              delete(res[key]);
+            }
+          }
+
+          this.results = {
+            type: 'search',
+            query: description.search,
+            results: res
+          };
+
+          this.loading = false;
+        })
       }
     }
     EventBus.$on('load', this.onLoad);
+
+
+    this.mediaPlaybackError = err => {
+      console.log(err);
+    }
+    this.musicKit.addEventListener(window.MusicKit.Events.mediaPlaybackError, this.mediaPlaybackError);
 
     // Trigger loading recommendations
     if (!this.results) {
@@ -297,6 +384,8 @@ export default {
 
         if (playlists.length == 100) {
           getPlaylists(start + 100);
+        } else {
+          this.loading = false;
         }
       });
     };
@@ -306,6 +395,8 @@ export default {
   destroyed: function() {
     EventBus.$off('queue', this.onQueue);
     EventBus.$off('load', this.onLoad);
+
+    this.musicKit.removeEventListener(window.MusicKit.Events.mediaPlaybackError, this.mediaPlaybackError);
   },
   components: {
     Playlists,
@@ -315,7 +406,8 @@ export default {
     Albums,
     Artists,
     SongCollection,
-    Recommendations
+    Recommendations,
+    SearchResults
   }
 }
 </script>
@@ -371,5 +463,9 @@ h3.heading {
 
 .text-sm {
   font-size: 0.9em;
+}
+
+.loading {
+  font-size: 80px;
 }
 </style>
